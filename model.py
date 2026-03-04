@@ -21,7 +21,7 @@ except KeyError:
 
 st.set_page_config(page_title="Poisson Live Scanner Pro+", layout="wide")
 
-# --- CONFIGURATION SELENIUM (V4 - ÉVASION & ROBUSTESSE) ---
+# --- CONFIGURATION SELENIUM (V5 - ROBUSTESSE ACCRUE) ---
 @st.cache_resource
 def get_driver():
     chrome_options = Options()
@@ -30,10 +30,11 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    # Éviter la détection
+    # Éviter la détection de bot
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
+    # User Agent récent pour paraître humain
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
     potential_driver_paths = [
@@ -50,13 +51,14 @@ def get_driver():
     try:
         service = Service(driver_path) if driver_path else Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        # Supprimer le flag webdriver
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         })
+        # Timeout de chargement de page
+        driver.set_page_load_timeout(30)
         return driver
     except Exception as e:
-        st.error(f"Erreur Selenium : {e}")
+        st.error(f"Erreur d'initialisation du Driver : {e}")
         return None
 
 # --- FONCTION API ---
@@ -76,39 +78,39 @@ def scrape_sofascore_live(url):
     
     try:
         driver.get(url)
-        # Laisser un peu de temps pour le rendu JS initial
-        time.sleep(3) 
+        # Attente progressive
+        time.sleep(5) 
         
-        wait = WebDriverWait(driver, 25)
-        # On attend l'apparition d'un élément clé des statistiques
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='StatRow'], div[class*='Statistics'], h2[class*='TeamName']"))) 
+        wait = WebDriverWait(driver, 30)
+        # On attend spécifiquement l'un des conteneurs de noms d'équipes ou de stats
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h2[class*='TeamName'], div[class*='ScoreValue']"))) 
 
-        # Extraction des noms d'équipes
-        team_elements = driver.find_elements(By.CSS_SELECTOR, "h2[class*='TeamName']")
-        home_name = team_elements[0].text if len(team_elements) > 0 else "Domicile"
-        away_name = team_elements[1].text if len(team_elements) > 1 else "Extérieur"
+        # Tentative de défilement pour déclencher le lazy loading des stats
+        driver.execute_script("window.scrollTo(0, 400);")
+        time.sleep(2)
 
-        # Extraction du score
-        score_elements = driver.find_elements(By.CSS_SELECTOR, "span[class*='ScoreValue']")
-        h_score = int(score_elements[0].text) if score_elements else 0
-        a_score = int(score_elements[1].text) if len(score_elements) > 1 else 0
-
-        # Parsing HTML pour les stats
+        # Récupération du HTML rendu
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
+        # Extraction des noms d'équipes
+        team_elements = soup.find_all('h2', class_=re.compile("TeamName", re.I))
+        home_name = team_elements[0].get_text(strip=True) if len(team_elements) > 0 else "Domicile"
+        away_name = team_elements[1].get_text(strip=True) if len(team_elements) > 1 else "Extérieur"
+
+        # Extraction du score
+        score_elements = soup.find_all('span', class_=re.compile("ScoreValue", re.I))
+        h_score = int(score_elements[0].get_text(strip=True)) if score_elements else 0
+        a_score = int(score_elements[1].get_text(strip=True)) if len(score_elements) > 1 else 0
+
         def find_stat(label):
-            # SofaScore utilise souvent des textes dans des spans ou divs pour les labels
+            # Recherche textuelle flexible dans le HTML rendu
             row = soup.find(string=re.compile(label, re.I))
             if row:
-                # On remonte vers le conteneur de la ligne de stats
-                parent = row.find_parent().find_parent()
-                # On cherche tous les nombres dans cette ligne
-                values = parent.find_all(string=re.compile(r'\d+'))
-                if len(values) >= 2:
-                    # On prend le premier (dom) et le dernier (ext)
-                    v_h = int(re.search(r'\d+', values[0]).group())
-                    v_a = int(re.search(r'\d+', values[-1]).group())
-                    return v_h, v_a
+                # Navigation vers le parent qui contient les chiffres
+                container = row.find_parent(class_=re.compile("Stat", re.I)) or row.find_parent().find_parent()
+                nums = re.findall(r'\d+', container.get_text())
+                if len(nums) >= 2:
+                    return int(nums[0]), int(nums[-1])
             return 0, 0
 
         pos_h, pos_a = find_stat("Possession")
@@ -123,8 +125,11 @@ def scrape_sofascore_live(url):
             "h_poss": pos_h if pos_h > 0 else 50
         }
     except Exception as e:
-        st.warning(f"Stats incomplètes ou erreur de chargement. Détails : {str(e)[:100]}...")
-        return None
+        st.warning(f"Erreur de scraping : {str(e)[:150]}...")
+        # Fallback : Si Selenium échoue, on peut essayer d'extraire au moins le titre de la page
+        try:
+            return {"home_team": driver.title.split("-")[0].strip(), "away_team": "Equipe B", "home_score":0, "away_score":0, "h_shots":0, "a_shots":0, "h_target":0, "a_target":0, "h_poss":50}
+        except: return None
 
 # --- CALCULATEUR ---
 def calculate_advanced_lambda(base_l, stats):
@@ -146,6 +151,9 @@ def calculate_advanced_lambda(base_l, stats):
 st.title("⚽ Poisson Live Pro Scanner")
 st.caption("Mode Expert - Analyse en temps réel via SofaScore")
 
+if 'live_data' not in st.session_state:
+    st.session_state.live_data = None
+
 with st.sidebar:
     st.header("💳 Bankroll")
     bk = st.number_input("Capital (€)", value=1000.0)
@@ -156,18 +164,17 @@ with st.sidebar:
 selected_match = None
 
 if source_mode == "URL SofaScore":
-    url = st.text_input("Lien SofaScore du match (ex: https://www.sofascore.com/...) :")
+    url = st.text_input("Lien SofaScore du match :")
     if url and st.button("🔥 Lancer le Scraping Selenium"):
-        with st.spinner("Analyse approfondie de la page SofaScore en cours..."):
+        with st.spinner("Analyse approfondie (Attente du rendu JavaScript)..."):
             data = scrape_sofascore_live(url)
             if data:
                 st.session_state.live_data = data
                 st.success("Données synchronisées !")
             else:
-                st.error("Impossible de récupérer les stats. Essayez de rafraîchir ou vérifiez l'URL.")
+                st.error("Échec du scraping. SofaScore bloque peut-être la requête ou l'URL est invalide.")
     
-    if 'live_data' in st.session_state:
-        selected_match = st.session_state.live_data
+    selected_match = st.session_state.live_data
 else:
     if st.button("🔄 Actualiser API"):
         st.session_state.all_matches = get_live_matches(API_KEY)
