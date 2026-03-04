@@ -1,13 +1,6 @@
 import streamlit as st
 import requests
 from scipy.stats import poisson
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import time
 import re
@@ -39,43 +32,43 @@ def get_live_matches(key):
         st.error(f"Erreur API : {e}")
         return []
 
-# --- MOTEUR DE SCRAPING ---
-def get_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-
+# --- MOTEUR DE RÉCUPÉRATION LÉGER (SANS SELENIUM) ---
 def scrape_full_match_data(url):
-    """Scrape le score, les noms d'équipes et les stats détaillées depuis l'URL."""
-    driver = get_driver()
+    """
+    Récupère les données SofaScore via requêtes HTTP directes.
+    Utilise un User-Agent pour éviter les blocages simples.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
-        driver.get(url)
-        wait = WebDriverWait(driver, 10)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="Box"]')))
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            st.error(f"Impossible d'accéder à la page (Erreur {response.status_code})")
+            return None
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Tentative d'extraction des noms d'équipes et score
-        try:
-            teams = soup.find_all('h2')
-            h_team = teams[0].get_text(strip=True) if len(teams) > 0 else "Domicile"
-            a_team = teams[1].get_text(strip=True) if len(teams) > 1 else "Extérieur"
-        except:
-            h_team, a_team = "Domicile", "Extérieur"
+        # Extraction intelligente via les balises Meta (plus stable sur SofaScore)
+        title = soup.find('title').get_text() if soup.find('title') else ""
+        
+        # Format SofaScore : "TeamA - TeamB live score, H2H and lineups | SofaScore"
+        home_team, away_team = "Domicile", "Extérieur"
+        if " - " in title:
+            teams_part = title.split(" live score")[0]
+            if " - " in teams_part:
+                home_team, away_team = teams_part.split(" - ", 1)
 
-        driver.quit()
         return {
-            "home_team": h_team,
-            "away_team": a_team,
-            "tirs_cadres": 6,
-            "corners": 4,
+            "home_team": home_team.strip(),
+            "away_team": away_team.strip(),
+            "tirs_cadres": 5, # Valeur de base à ajuster manuellement
+            "corners": 4,     # Valeur de base à ajuster manuellement
             "home_score": 0,
             "away_score": 0
         }
-    except:
-        if driver: driver.quit()
+    except Exception as e:
+        st.error(f"Erreur lors de l'analyse : {str(e)}")
         return None
 
 # --- CALCULATEUR DYNAMIQUE ---
