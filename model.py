@@ -57,7 +57,7 @@ def scrape_full_match_data(url):
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="Box"]')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Tentative d'extraction des noms d'équipes et score (sélecteurs génériques Sofa)
+        # Tentative d'extraction des noms d'équipes et score
         try:
             teams = soup.find_all('h2')
             h_team = teams[0].get_text(strip=True) if len(teams) > 0 else "Domicile"
@@ -69,7 +69,7 @@ def scrape_full_match_data(url):
         return {
             "home_team": h_team,
             "away_team": a_team,
-            "tirs_cadres": 6, # Valeurs par défaut si le scraping spécifique échoue
+            "tirs_cadres": 6,
             "corners": 4,
             "home_score": 0,
             "away_score": 0
@@ -90,7 +90,7 @@ def calculate_live_value(base_l, stats, red_home=0, red_away=0):
 
 # --- INTERFACE PRINCIPALE ---
 st.title("⚽ Scanner de Value Live Pro")
-st.caption("Sélection API ou Analyse via URL SofaScore | Analyse de Poisson")
+st.caption("Filtrage par Pays/Ligue ou Analyse via URL SofaScore | Poisson Expert")
 
 # Sidebar : Gestion de Bankroll et Mode
 with st.sidebar:
@@ -113,7 +113,7 @@ with st.sidebar:
 selected_match_data = None
 
 if source_mode == "Lien SofaScore Direct":
-    st.subheader("🔗 Analyse via URL")
+    st.subheader("🔗 Analyse via URL (Match non répertorié)")
     url_input = st.text_input("Collez l'URL SofaScore du match ici :", placeholder="https://www.sofascore.com/team-a-team-b/...")
     
     if url_input:
@@ -138,21 +138,36 @@ if source_mode == "Lien SofaScore Direct":
             "home_score": h_score, "away_score": a_score
         }
 else:
-    # Mode API classique
+    # Mode API avec filtrage hiérarchique
     if 'all_matches' in st.session_state and st.session_state.all_matches:
-        search_query = st.text_input("🔍 Filtrer (ex: Greece, Austria...)", "").lower()
         matches = st.session_state.all_matches
         
-        filtered_matches = [m for m in matches if search_query in m.get('home_team', '').lower() or search_query in m.get('away_team', '').lower() or search_query in m.get('competition_cluster', '').lower()]
+        # 1. Grouper par Pays et Ligue
+        hierarchy = {}
+        for m in matches:
+            country = m.get('competition_cluster', 'International')
+            league = m.get('competition_name', 'Autre')
+            if country not in hierarchy: hierarchy[country] = {}
+            if league not in hierarchy[country]: hierarchy[country][league] = []
+            hierarchy[country][league].append(m)
+            
+        st.subheader("📡 Sélection du Match API")
+        col_f1, col_f2 = st.columns(2)
         
-        if filtered_matches:
-            match_options = [f"{m['home_team']} {m.get('home_score', 0)}-{m.get('away_score', 0)} {m['away_team']}" for m in filtered_matches]
-            choice = st.selectbox("🎯 Match en direct :", match_options)
-            selected_match_data = filtered_matches[match_options.index(choice)]
-        else:
-            st.info("Aucun match trouvé avec ce filtre.")
+        with col_f1:
+            countries = sorted(list(hierarchy.keys()))
+            selected_country = st.selectbox("🌍 Sélectionner un pays :", countries)
+            
+        with col_f2:
+            leagues = sorted(list(hierarchy[selected_country].keys()))
+            selected_league = st.selectbox("🏆 Compétition :", leagues)
+            
+        current_league_matches = hierarchy[selected_country][selected_league]
+        match_options = [f"{m['home_team']} {m.get('home_score', 0)}-{m.get('away_score', 0)} {m['away_team']}" for m in current_league_matches]
+        choice = st.selectbox("🎯 Choisir le match :", match_options)
+        selected_match_data = current_league_matches[match_options.index(choice)]
     else:
-        st.info("Utilisez le bouton 'Actualiser' dans la barre latérale.")
+        st.info("Utilisez le bouton 'Actualiser' dans la barre latérale pour charger les matchs API.")
 
 # --- ANALYSE DU MATCH ---
 if selected_match_data:
@@ -173,7 +188,6 @@ if selected_match_data:
 
     with c3:
         st.write("📈 **Statistiques Live**")
-        # Si on est en mode URL, on peut réutiliser le scraper pour les stats
         tirs = st.number_input("Tirs Cadrés totaux", value=5)
         corners = st.number_input("Corners totaux", value=4)
 
