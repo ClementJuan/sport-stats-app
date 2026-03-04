@@ -10,6 +10,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import os
+import time
 
 # --- CONFIGURATION ---
 try:
@@ -20,7 +21,7 @@ except KeyError:
 
 st.set_page_config(page_title="Poisson Live Scanner Pro+", layout="wide")
 
-# --- CONFIGURATION SELENIUM (V3 - UTILISATION BINAIRE SYSTÈME) ---
+# --- CONFIGURATION SELENIUM (V4 - ÉVASION & ROBUSTESSE) ---
 @st.cache_resource
 def get_driver():
     chrome_options = Options()
@@ -29,10 +30,12 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # Éviter la détection
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
-    # Chemins standards sur Streamlit Cloud pour Chromium
-    # Note : Le binaire 'chromium' installé via apt installe aussi son driver
     potential_driver_paths = [
         "/usr/bin/chromedriver",
         "/usr/lib/chromium-browser/chromedriver"
@@ -45,18 +48,18 @@ def get_driver():
             break
 
     try:
-        if driver_path:
-            service = Service(driver_path)
-            return webdriver.Chrome(service=service, options=chrome_options)
-        else:
-            # Fallback automatique (si les chemins fixes échouent)
-            return webdriver.Chrome(options=chrome_options)
+        service = Service(driver_path) if driver_path else Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Supprimer le flag webdriver
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        })
+        return driver
     except Exception as e:
         st.error(f"Erreur Selenium : {e}")
-        st.info("💡 Si l'erreur persiste après le Reboot, vérifiez que 'packages.txt' contient bien 'chromium'.")
         return None
 
-# --- FONCTION API POUR LA LISTE DES MATCHS ---
+# --- FONCTION API ---
 def get_live_matches(key):
     url = "https://football-prediction-api.p.rapidapi.com/api/v2/predictions"
     headers = {"X-RapidAPI-Key": key, "X-RapidAPI-Host": "football-prediction-api.p.rapidapi.com"}
@@ -66,17 +69,19 @@ def get_live_matches(key):
         return response.json().get('data', []) if response.status_code == 200 else []
     except: return []
 
-# --- SCRAPING AVANCÉ AVEC SELENIUM ---
+# --- SCRAPING AVANCÉ ---
 def scrape_sofascore_live(url):
     driver = get_driver()
-    if not driver: 
-        return None
+    if not driver: return None
     
     try:
         driver.get(url)
-        wait = WebDriverWait(driver, 20)
-        # Attente d'un élément générique de stats
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='StatRow'], div[class*='Statistics']"))) 
+        # Laisser un peu de temps pour le rendu JS initial
+        time.sleep(3) 
+        
+        wait = WebDriverWait(driver, 25)
+        # On attend l'apparition d'un élément clé des statistiques
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='StatRow'], div[class*='Statistics'], h2[class*='TeamName']"))) 
 
         # Extraction des noms d'équipes
         team_elements = driver.find_elements(By.CSS_SELECTOR, "h2[class*='TeamName']")
@@ -88,15 +93,19 @@ def scrape_sofascore_live(url):
         h_score = int(score_elements[0].text) if score_elements else 0
         a_score = int(score_elements[1].text) if len(score_elements) > 1 else 0
 
-        # Parsing avec BeautifulSoup pour la rapidité sur les stats textuelles
+        # Parsing HTML pour les stats
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
         def find_stat(label):
+            # SofaScore utilise souvent des textes dans des spans ou divs pour les labels
             row = soup.find(string=re.compile(label, re.I))
             if row:
+                # On remonte vers le conteneur de la ligne de stats
                 parent = row.find_parent().find_parent()
+                # On cherche tous les nombres dans cette ligne
                 values = parent.find_all(string=re.compile(r'\d+'))
                 if len(values) >= 2:
+                    # On prend le premier (dom) et le dernier (ext)
                     v_h = int(re.search(r'\d+', values[0]).group())
                     v_a = int(re.search(r'\d+', values[-1]).group())
                     return v_h, v_a
@@ -114,7 +123,7 @@ def scrape_sofascore_live(url):
             "h_poss": pos_h if pos_h > 0 else 50
         }
     except Exception as e:
-        st.warning(f"Stats détaillées non récupérées. Erreur: {e}")
+        st.warning(f"Stats incomplètes ou erreur de chargement. Détails : {str(e)[:100]}...")
         return None
 
 # --- CALCULATEUR ---
@@ -135,7 +144,7 @@ def calculate_advanced_lambda(base_l, stats):
 
 # --- UI STREAMLIT ---
 st.title("⚽ Poisson Live Pro Scanner")
-st.caption("Synchronisation intelligente via SofaScore & Selenium")
+st.caption("Mode Expert - Analyse en temps réel via SofaScore")
 
 with st.sidebar:
     st.header("💳 Bankroll")
@@ -147,13 +156,15 @@ with st.sidebar:
 selected_match = None
 
 if source_mode == "URL SofaScore":
-    url = st.text_input("Lien SofaScore du match :")
+    url = st.text_input("Lien SofaScore du match (ex: https://www.sofascore.com/...) :")
     if url and st.button("🔥 Lancer le Scraping Selenium"):
-        with st.spinner("Analyse du match en cours (Chrome Headless)..."):
+        with st.spinner("Analyse approfondie de la page SofaScore en cours..."):
             data = scrape_sofascore_live(url)
             if data:
                 st.session_state.live_data = data
-                st.success("Statistiques synchronisées !")
+                st.success("Données synchronisées !")
+            else:
+                st.error("Impossible de récupérer les stats. Essayez de rafraîchir ou vérifiez l'URL.")
     
     if 'live_data' in st.session_state:
         selected_match = st.session_state.live_data
