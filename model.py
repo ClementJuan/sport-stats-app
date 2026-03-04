@@ -2,8 +2,14 @@ import streamlit as st
 import requests
 from scipy.stats import poisson
 from bs4 import BeautifulSoup
-import time
 import re
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 try:
@@ -12,206 +18,176 @@ except KeyError:
     st.error("⚠️ Clé 'api_key' manquante dans les Secrets Streamlit.")
     st.stop()
 
-st.set_page_config(page_title="Poisson Live Scanner Pro", layout="wide")
+st.set_page_config(page_title="Poisson Live Scanner Pro+", layout="wide")
 
-# --- FONCTION API OPTIMISÉE POUR LE LIVE ---
+# --- CONFIGURATION SELENIUM (POUR LE CLOUD) ---
+@st.cache_resource
+def get_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    # Simulation d'un vrai utilisateur
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    try:
+        # Installation automatique du driver compatible
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=chrome_options)
+    except Exception as e:
+        st.error(f"Erreur d'initialisation du driver : {e}")
+        return None
+
+# --- FONCTION API POUR LA LISTE DES MATCHS ---
 def get_live_matches(key):
-    """Récupère les matchs via l'API de prédiction."""
     url = "https://football-prediction-api.p.rapidapi.com/api/v2/predictions"
-    headers = {
-        "X-RapidAPI-Key": key,
-        "X-RapidAPI-Host": "football-prediction-api.p.rapidapi.com"
-    }
+    headers = {"X-RapidAPI-Key": key, "X-RapidAPI-Host": "football-prediction-api.p.rapidapi.com"}
     params = {"market": "classic", "federation": "UEFA"} 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=15)
-        if response.status_code == 200:
-            return response.json().get('data', [])
-        return []
-    except Exception as e:
-        st.error(f"Erreur API : {e}")
-        return []
+        return response.json().get('data', []) if response.status_code == 200 else []
+    except: return []
 
-# --- MOTEUR DE RÉCUPÉRATION LÉGER (SANS SELENIUM) ---
-def scrape_full_match_data(url):
-    """
-    Récupère les données SofaScore via requêtes HTTP directes.
-    Utilise un User-Agent pour éviter les blocages simples.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+# --- SCRAPING AVANCÉ AVEC SELENIUM ---
+def scrape_sofascore_live(url):
+    driver = get_driver()
+    if not driver: return None
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            st.error(f"Impossible d'accéder à la page (Erreur {response.status_code})")
-            return None
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
+        driver.get(url)
+        # Attente que les stats soient visibles (sélecteur générique SofaScore)
+        wait = WebDriverWait(driver, 15)
+        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "sc-60320703-0"))) # Conteneur de stats
+
+        # Extraction des noms
+        home_name = driver.find_element(By.CSS_SELECTOR, "h2[class*='TeamName']").text
+        away_name = driver.find_elements(By.CSS_SELECTOR, "h2[class*='TeamName']")[1].text
+
+        # Extraction du score
+        score_elements = driver.find_elements(By.CSS_SELECTOR, "span[class*='ScoreValue']")
+        h_score = int(score_elements[0].text) if score_elements else 0
+        a_score = int(score_elements[1].text) if len(score_elements) > 1 else 0
+
+        # Fonction helper pour chercher les stats dans le texte de la page
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
         
-        # Extraction intelligente via les balises Meta (plus stable sur SofaScore)
-        title = soup.find('title').get_text() if soup.find('title') else ""
-        
-        # Format SofaScore : "TeamA - TeamB live score, H2H and lineups | SofaScore"
-        home_team, away_team = "Domicile", "Extérieur"
-        if " - " in title:
-            teams_part = title.split(" live score")[0]
-            if " - " in teams_part:
-                home_team, away_team = teams_part.split(" - ", 1)
+        def find_stat(label):
+            # Cherche la ligne contenant le label (ex: "Possession")
+            row = soup.find(text=re.compile(label, re.I))
+            if row:
+                parent = row.find_parent().find_parent()
+                values = parent.find_all(text=re.compile(r'\d+'))
+                if len(values) >= 2:
+                    return int(values[0].replace('%','')), int(values[-1].replace('%',''))
+            return 0, 0
+
+        pos_h, pos_a = find_stat("Possession")
+        shots_h, shots_a = find_stat("Total de tirs")
+        target_h, target_a = find_stat("Tirs cadrés")
 
         return {
-            "home_team": home_team.strip(),
-            "away_team": away_team.strip(),
-            "tirs_cadres": 5, # Valeur de base à ajuster manuellement
-            "corners": 4,     # Valeur de base à ajuster manuellement
-            "home_score": 0,
-            "away_score": 0
+            "home_team": home_name, "away_team": away_name,
+            "home_score": h_score, "away_score": a_score,
+            "h_shots": shots_h, "a_shots": shots_a,
+            "h_target": target_h, "a_target": target_a,
+            "h_poss": pos_h if pos_h > 0 else 50
         }
     except Exception as e:
-        st.error(f"Erreur lors de l'analyse : {str(e)}")
+        st.warning(f"Stats détaillées non récupérées (timeout). Utilisation du mode manuel. Erreur: {e}")
         return None
 
-# --- CALCULATEUR DYNAMIQUE ---
-def calculate_live_value(base_l, stats, red_home=0, red_away=0):
-    modifier = 1.0
-    min_ = max(stats.get('minute', 45), 1)
-    if stats.get('tirs_cadres', 0) > (min_ / 10): modifier += 0.15
-    if stats.get('corners', 0) > (min_ / 8): modifier += 0.10
-    if red_home > 0: modifier += (0.25 * red_home)
-    if red_away > 0: modifier += (0.25 * red_away)
-    return base_l * modifier
+# --- CALCULATEUR ---
+def calculate_advanced_lambda(base_l, stats):
+    danger_h = (stats['h_target'] * 0.35) + ((stats['h_shots'] - stats['h_target']) * 0.12)
+    danger_a = (stats['a_target'] * 0.35) + ((stats['a_shots'] - stats['a_target']) * 0.12)
+    
+    talent_h = max(0.5, 2.0 / stats['cote_pre_h']) 
+    talent_a = max(0.5, 2.0 / stats['cote_pre_a'])
+    
+    poss_bonus_h = 0.08 if stats['h_poss'] > 57 else 0
+    poss_bonus_a = 0.08 if (100 - stats['h_poss']) > 57 else 0
+    
+    mod_h = (danger_h * talent_h) + poss_bonus_h - (stats['h_red'] * 0.3)
+    mod_a = (danger_a * talent_a) + poss_bonus_a - (stats['a_red'] * 0.3)
+    
+    return base_l * (1.0 + mod_h + mod_a)
 
-# --- INTERFACE PRINCIPALE ---
-st.title("⚽ Scanner de Value Live Pro")
-st.caption("Filtrage par Pays/Ligue ou Analyse via URL SofaScore | Poisson Expert")
+# --- UI STREAMLIT ---
+st.title("⚽ Poisson Live Pro Scanner (Selenium Edition)")
+st.caption("Extraction automatique des tirs et de la possession via SofaScore")
 
-# Sidebar : Gestion de Bankroll et Mode
 with st.sidebar:
     st.header("💳 Bankroll")
     bk = st.number_input("Capital (€)", value=1000.0)
     kelly_f = st.slider("Fraction Kelly", 0.1, 1.0, 0.2)
-    
     st.divider()
-    st.header("🛠️ Source de données")
-    source_mode = st.radio("Choisir la source :", ["Liste API Live", "Lien SofaScore Direct"])
-    
-    if source_mode == "Liste API Live":
-        if st.button("🔄 Actualiser les matchs"):
-            with st.spinner("Recherche des matchs..."):
-                st.session_state.all_matches = get_live_matches(API_KEY)
-            if st.session_state.all_matches:
-                st.toast(f"{len(st.session_state.all_matches)} matchs trouvés !")
+    source_mode = st.radio("Source :", ["API Live", "URL SofaScore"])
 
-# --- LOGIQUE DE SÉLECTION DU MATCH ---
-selected_match_data = None
+selected_match = None
 
-if source_mode == "Lien SofaScore Direct":
-    st.subheader("🔗 Analyse via URL (Match non répertorié)")
-    url_input = st.text_input("Collez l'URL SofaScore du match ici :", placeholder="https://www.sofascore.com/team-a-team-b/...")
+if source_mode == "URL SofaScore":
+    url = st.text_input("Lien SofaScore du match :")
+    if url and st.button("🔥 Lancer le Scraping Selenium"):
+        with st.spinner("Le driver Chrome analyse la page SofaScore..."):
+            data = scrape_sofascore_live(url)
+            if data:
+                st.session_state.live_data = data
+                st.success("Toutes les statistiques ont été synchronisées !")
     
-    if url_input:
-        if st.button("🔍 Charger les données du match"):
-            with st.spinner("Analyse du lien..."):
-                scraped_data = scrape_full_match_data(url_input)
-                if scraped_data:
-                    st.session_state.manual_data = scraped_data
-                    st.success("Match détecté !")
-    
-    if 'manual_data' in st.session_state:
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            h_team = st.text_input("Équipe Domicile", value=st.session_state.manual_data['home_team'])
-            h_score = st.number_input("Score Dom.", value=st.session_state.manual_data['home_score'])
-        with col_m2:
-            a_team = st.text_input("Équipe Extérieur", value=st.session_state.manual_data['away_team'])
-            a_score = st.number_input("Score Ext.", value=st.session_state.manual_data['away_score'])
-        
-        selected_match_data = {
-            "home_team": h_team, "away_team": a_team,
-            "home_score": h_score, "away_score": a_score
-        }
+    if 'live_data' in st.session_state:
+        selected_match = st.session_state.live_data
 else:
-    # Mode API avec filtrage hiérarchique
-    if 'all_matches' in st.session_state and st.session_state.all_matches:
-        matches = st.session_state.all_matches
-        
-        # 1. Grouper par Pays et Ligue
-        hierarchy = {}
-        for m in matches:
-            country = m.get('competition_cluster', 'International')
-            league = m.get('competition_name', 'Autre')
-            if country not in hierarchy: hierarchy[country] = {}
-            if league not in hierarchy[country]: hierarchy[country][league] = []
-            hierarchy[country][league].append(m)
-            
-        st.subheader("📡 Sélection du Match API")
-        col_f1, col_f2 = st.columns(2)
-        
-        with col_f1:
-            countries = sorted(list(hierarchy.keys()))
-            selected_country = st.selectbox("🌍 Sélectionner un pays :", countries)
-            
-        with col_f2:
-            leagues = sorted(list(hierarchy[selected_country].keys()))
-            selected_league = st.selectbox("🏆 Compétition :", leagues)
-            
-        current_league_matches = hierarchy[selected_country][selected_league]
-        match_options = [f"{m['home_team']} {m.get('home_score', 0)}-{m.get('away_score', 0)} {m['away_team']}" for m in current_league_matches]
-        choice = st.selectbox("🎯 Choisir le match :", match_options)
-        selected_match_data = current_league_matches[match_options.index(choice)]
-    else:
-        st.info("Utilisez le bouton 'Actualiser' dans la barre latérale pour charger les matchs API.")
+    # Mode API (logique précédente)
+    if st.button("🔄 Actualiser API"):
+        st.session_state.all_matches = get_live_matches(API_KEY)
+    if 'all_matches' in st.session_state:
+        m_list = st.session_state.all_matches
+        choice = st.selectbox("Match :", [f"{m['home_team']} vs {m['away_team']}" for m in m_list])
+        selected_match = m_list[[f"{m['home_team']} vs {m['away_team']}" for m in m_list].index(choice)]
 
-# --- ANALYSE DU MATCH ---
-if selected_match_data:
+if selected_match:
+    st.header(f"{selected_match['home_team']} {selected_match['home_score']} - {selected_match['away_score']} {selected_match['away_team']}")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("🏠 Domicile")
+        c_pre_h = st.number_input("Cote pré-match Dom.", 1.01, 50.0, 1.80)
+        h_shots = st.number_input("Tirs Dom.", 0, 50, selected_match.get('h_shots', 5))
+        h_target = st.number_input("Tirs Cadrés Dom.", 0, 50, selected_match.get('h_target', 2))
+        h_poss = st.slider("% Possession Dom.", 0, 100, selected_match.get('h_poss', 50))
+        h_red = st.number_input("Rouges Dom.", 0, 5, 0)
+    with col2:
+        st.subheader("🚀 Extérieur")
+        c_pre_a = st.number_input("Cote pré-match Ext.", 1.01, 50.0, 3.50)
+        a_shots = st.number_input("Tirs Ext.", 0, 50, selected_match.get('a_shots', 3))
+        a_target = st.number_input("Tirs Cadrés Ext.", 0, 50, selected_match.get('a_target', 1))
+        st.info(f"Possession Ext. : {100-h_poss}%")
+        a_red = st.number_input("Rouges Ext.", 0, 5, 0)
+
     st.divider()
-    st.subheader(f"📊 {selected_match_data['home_team']} vs {selected_match_data['away_team']}")
-    
-    c1, c2, c3 = st.columns([1, 1, 2])
-    
-    with c1:
-        st.write("🔴 **Cartons Rouges**")
-        red_h = st.number_input(f"Rouge {selected_match_data['home_team']}", 0, 5, 0)
-        red_a = st.number_input(f"Rouge {selected_match_data['away_team']}", 0, 5, 0)
+    min_actuelle = st.slider("Minute", 1, 95, 75)
+    l_base = st.number_input("Lambda Pré-match", 0.1, 10.0, 2.6)
 
-    with c2:
-        st.write("⏱️ **Temps du match**")
-        minute = st.slider("Minute actuelle", 1, 95, 75)
-        st.write(f"Score : **{selected_match_data.get('home_score', 0)} - {selected_match_data.get('away_score', 0)}**")
-
-    with c3:
-        st.write("📈 **Statistiques Live**")
-        tirs = st.number_input("Tirs Cadrés totaux", value=5)
-        corners = st.number_input("Corners totaux", value=4)
-
-    # --- CALCULS DE VALUE ---
-    st.divider()
-    l_base = st.number_input("Lambda pré-match (Espérance de buts)", value=2.8, step=0.1)
-    l_dyn = calculate_live_value(l_base, {"minute": minute, "tirs_cadres": tirs, "corners": corners}, red_h, red_a)
+    stats_map = {
+        'h_shots': h_shots, 'h_target': h_target, 'h_poss': h_poss, 'h_red': h_red, 'cote_pre_h': c_pre_h,
+        'a_shots': a_shots, 'a_target': a_target, 'a_red': a_red, 'cote_pre_a': c_pre_a
+    }
     
-    t_restant = max((90 - minute) / 90, 0.05)
-    l_live = l_dyn * t_restant
+    l_dyn = calculate_advanced_lambda(l_base, stats_map)
+    l_live = l_dyn * (max((90 - min_actuelle), 5) / 90)
     prob_05 = 1 - poisson.pmf(0, l_live)
-    fair_cote = 1 / prob_05 if prob_05 > 0.01 else 100
+    fair_cote = 1/prob_05 if prob_05 > 0.01 else 100.0
     
-    res1, res2, res3 = st.columns(3)
-    with res1:
-        st.metric("Lambda Live", f"{l_dyn:.2f}", f"{l_dyn - l_base:+.2f}")
-        if red_h > 0 or red_a > 0:
-            st.warning(f"Malus numérique (+{(red_h+red_a)*25}%)")
-            
-    with res2:
-        st.metric("Probabilité +0.5 but", f"{prob_05:.1%}")
-        st.write(f"Cote 'Fair' : **{fair_cote:.2f}**")
-        
-    with res3:
-        cote_b = st.number_input("Cote Bookmaker (+0.5 but)", value=2.00, step=0.05)
-        edge = (prob_05 * cote_b) - 1
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Lambda Dynamique", f"{l_dyn:.2f}")
+    r2.metric("Probabilité +0.5", f"{prob_05:.1%}", f"Fair: {fair_cote:.2f}")
+    with r3:
+        bk_cote = st.number_input("Cote Bookmaker", value=fair_cote + 0.1)
+        edge = (prob_05 * bk_cote) - 1
         if edge > 0:
-            k_mise = (edge / (cote_b - 1)) * kelly_f
-            st.success(f"✅ VALUE : +{edge:.1%}")
-            st.metric("MISE CONSEILLÉE", f"{k_mise * bk:.2f} €")
-            if edge > 0.15: st.balloons()
-        else:
-            st.error("❌ AUCUNE VALUE")
-            st.info(f"Attendre une cote de {fair_cote:.2f}")
+            st.success(f"VALUE : +{edge:.1%}")
+            st.metric("MISE KELLY", f"{(edge/(bk_cote-1))*kelly_f*bk:.2f} €")
+        else: st.error("AUCUNE VALUE")
