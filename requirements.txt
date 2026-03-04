@@ -1,2 +1,6 @@
 streamlit
+requests
 scipy
+selenium
+webdriver-manager
+beautifulsoup4
