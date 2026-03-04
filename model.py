@@ -79,8 +79,14 @@ def get_live_matches(key):
 
 # --- CALCULATEUR ---
 def calculate_advanced_lambda(base_l, stats):
-    danger_h = (stats['h_target'] * 0.35) + ((stats['h_shots'] - stats['h_target']) * 0.12)
-    danger_a = (stats['a_target'] * 0.35) + ((stats['a_shots'] - stats['a_target']) * 0.12)
+    # Sécurisation des accès aux dictionnaires avec .get() et valeurs par défaut
+    h_t = stats.get('h_target', 0)
+    h_s = stats.get('h_shots', 0)
+    a_t = stats.get('a_target', 0)
+    a_s = stats.get('a_shots', 0)
+    
+    danger_h = (h_t * 0.35) + ((h_s - h_t) * 0.12)
+    danger_a = (a_t * 0.35) + ((a_s - a_t) * 0.12)
     
     c_h = stats.get('cote_pre_h', 1.8)
     c_a = stats.get('cote_pre_a', 3.5)
@@ -89,11 +95,8 @@ def calculate_advanced_lambda(base_l, stats):
     talent_h = max(0.5, 2.0 / c_h) if c_h > 0 else 1.0
     talent_a = max(0.5, 2.0 / c_a) if c_a > 0 else 1.0
     
-    # Impact de la cote du nul sur l'espérance de but
-    # Un nul faible (ex 2.8) réduit l'espérance, un nul élevé (ex 4.5) l'augmente.
-    # La valeur pivot est fixée à 3.20.
     draw_factor = 1.0 + (c_n - 3.20) * 0.05
-    draw_factor = max(0.85, min(1.25, draw_factor)) # Limiter l'impact entre -15% et +25%
+    draw_factor = max(0.85, min(1.25, draw_factor)) 
     
     poss_bonus_h = 0.08 if stats.get('h_poss', 50) > 57 else 0
     poss_bonus_a = 0.08 if (100 - stats.get('h_poss', 50)) > 57 else 0
@@ -101,7 +104,6 @@ def calculate_advanced_lambda(base_l, stats):
     mod_h = (danger_h * talent_h) + poss_bonus_h - (stats.get('h_red', 0) * 0.3)
     mod_a = (danger_a * talent_a) + poss_bonus_a - (stats.get('a_red', 0) * 0.3)
     
-    # On applique le multiplicateur du nul au résultat final
     return base_l * (1.0 + mod_h + mod_a) * draw_factor
 
 # --- UI STREAMLIT ---
@@ -150,10 +152,9 @@ if selected_match:
     
     st.header(f"{h_name} {h_score} - {a_score} {a_name}")
     
-    # Ajout de la cote du nul au centre
     col_n1, col_n2, col_n3 = st.columns(3)
     with col_n2:
-        c_pre_n = st.number_input("Cote pré-match du NUL", 1.01, 20.0, 3.20, help="Plus cette cote est basse, plus le match est attendu comme fermé.")
+        c_pre_n = st.number_input("Cote pré-match du NUL", 1.01, 20.0, 3.20)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -179,31 +180,27 @@ if selected_match:
     
     stats_map = {
         'h_shots': h_shots, 'h_target': h_target, 'h_poss': h_poss, 'h_red': h_red, 
-        'cote_pre_h': c_pre_h, 'cote_pre_a': c_pre_a, 'cote_pre_n': c_pre_n
+        'cote_pre_h': c_pre_h, 'a_shots': a_shots, 'a_target': a_target, 'a_red': a_red,
+        'cote_pre_a': c_pre_a, 'cote_pre_n': c_pre_n
     }
     
-    # Calcul du Lambda ajusté au temps restant et au biais du nul
     l_dyn = calculate_advanced_lambda(l_base, stats_map)
     temps_restant_pct = max((90 - min_actuelle), 5) / 90
     l_live = l_dyn * temps_restant_pct
 
     with c_right:
         st.subheader("📊 Analyse Multi-Marchés")
-        
         paliers = [0.5, 1.5, 2.5, 3.5, 4.5]
-        
         for p in paliers:
             if p > total_score_actuel:
                 buts_requis = p - total_score_actuel
                 n_requis = int(buts_requis + 0.5) 
                 prob_over = 1 - poisson.cdf(n_requis - 1, l_live)
                 fair_cote = 1/prob_over if prob_over > 0.001 else 999.0
-                
                 with st.expander(f"Marché : Over {p} (Total Buts)", expanded=(p == total_score_actuel + 0.5)):
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Probabilité", f"{prob_over:.1%}")
                     m2.metric("Cote Fair", f"{fair_cote:.2f}")
-                    
                     with m3:
                         bk_c = st.number_input(f"Cote Bookie Over {p}", value=round(fair_cote + 0.2, 2), key=f"bk_{p}")
                         edge = (prob_over * bk_c) - 1
@@ -211,10 +208,8 @@ if selected_match:
                             st.success(f"VALUE : +{edge:.1%}")
                             mise = max(0, (edge/(bk_c-1))*kelly_f*bk)
                             st.write(f"**Mise : {mise:.2f} €**")
-                        else:
-                            st.write("Pas de value")
-            else:
-                st.write(f"✅ **Over {p}** est déjà validé (Score: {total_score_actuel})")
+                        else: st.write("Pas de value")
+            else: st.write(f"✅ **Over {p}** est déjà validé")
 
     st.divider()
-    st.info(f"Lambda Actuel (Pression + Draw Bias) : {l_dyn:.2f} | Lambda Live : {l_live:.2f}")
+    st.info(f"Lambda Actuel : {l_dyn:.2f} | Lambda Live : {l_live:.2f}")
