@@ -27,27 +27,17 @@ def scrape_sofascore_fast(url):
     
     data = None
     try:
-        # On tente de récupérer le HTML brut
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             st.error(f"Erreur SofaScore : Code {response.status_code}")
             return None
             
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Extraction des noms (SofaScore stocke souvent les données dans un JSON initial dans le HTML)
-        # On cherche d'abord dans les balises meta ou les titres pour un fallback rapide
         page_title = soup.find('title').get_text() if soup.find('title') else ""
         
-        # Tentative d'extraction par regex dans le HTML (plus robuste que les classes CSS changeantes)
-        # On cherche le score et les équipes dans le titre ou les meta tags
         teams = ["Domicile", "Extérieur"]
         if " - " in page_title:
             teams = page_title.split(" live")[0].split(" - ")
-        
-        # Simulation de statistiques (Fallback si le JS n'est pas rendu côté serveur)
-        # Note : Sans Selenium, on accède au HTML "statique". 
-        # Si SofaScore masque tout derrière du JS, on utilise une approche par l'API interne si possible.
         
         h_score = 0
         a_score = 0
@@ -56,16 +46,12 @@ def scrape_sofascore_fast(url):
             h_score = int(score_match.group(1))
             a_score = int(score_match.group(2))
 
-        # Pour les stats détaillées sans Selenium, SofaScore nécessite souvent l'ID du match
-        # On essaie d'extraire l'ID du match de l'URL pour une future extension API directe
-        match_id = re.search(r'/([^/]+)$', url.strip('/')).group(1) if "/" in url else None
-
         data = {
             "home_team": teams[0].strip(),
             "away_team": teams[1].strip() if len(teams) > 1 else "Extérieur",
             "home_score": h_score,
             "away_score": a_score,
-            "h_shots": 0, # Les stats avancées nécessitent souvent le rendu JS
+            "h_shots": 0,
             "a_shots": 0,
             "h_target": 0,
             "a_target": 0,
@@ -96,14 +82,18 @@ def calculate_advanced_lambda(base_l, stats):
     danger_h = (stats['h_target'] * 0.35) + ((stats['h_shots'] - stats['h_target']) * 0.12)
     danger_a = (stats['a_target'] * 0.35) + ((stats['a_shots'] - stats['a_target']) * 0.12)
     
-    talent_h = max(0.5, 2.0 / stats['cote_pre_h']) 
-    talent_a = max(0.5, 2.0 / stats['cote_pre_a'])
+    # Sécurité division par zéro sur les cotes
+    c_h = stats.get('cote_pre_h', 1.8)
+    c_a = stats.get('cote_pre_a', 3.5)
     
-    poss_bonus_h = 0.08 if stats['h_poss'] > 57 else 0
-    poss_bonus_a = 0.08 if (100 - stats['h_poss']) > 57 else 0
+    talent_h = max(0.5, 2.0 / c_h) if c_h > 0 else 1.0
+    talent_a = max(0.5, 2.0 / c_a) if c_a > 0 else 1.0
     
-    mod_h = (danger_h * talent_h) + poss_bonus_h - (stats['h_red'] * 0.3)
-    mod_a = (danger_a * talent_a) + poss_bonus_a - (stats['a_red'] * 0.3)
+    poss_bonus_h = 0.08 if stats.get('h_poss', 50) > 57 else 0
+    poss_bonus_a = 0.08 if (100 - stats.get('h_poss', 50)) > 57 else 0
+    
+    mod_h = (danger_h * talent_h) + poss_bonus_h - (stats.get('h_red', 0) * 0.3)
+    mod_a = (danger_a * talent_a) + poss_bonus_a - (stats.get('a_red', 0) * 0.3)
     
     return base_l * (1.0 + mod_h + mod_a)
 
@@ -139,27 +129,34 @@ else:
     if 'all_matches' in st.session_state:
         m_list = st.session_state.all_matches
         if m_list:
-            choice = st.selectbox("Sélectionnez un match :", [f"{m['home_team']} vs {m['away_team']}" for m in m_list])
-            selected_match = m_list[[f"{m['home_team']} vs {m['away_team']}" for m in m_list].index(choice)]
+            choice = st.selectbox("Sélectionnez un match :", [f"{m.get('home_team', '??')} vs {m.get('away_team', '??')}" for m in m_list])
+            selected_match = m_list[[f"{m.get('home_team', '??')} vs {m.get('away_team', '??')}" for m in m_list].index(choice)]
         else:
             st.warning("Aucun match trouvé via l'API. Essayez le mode URL.")
 
 if selected_match:
-    st.header(f"{selected_match['home_team']} {selected_match['home_score']} - {selected_match['away_score']} {selected_match['away_team']}")
+    # Correction KeyError : Utilisation de .get() pour supporter les différents noms de clés entre Scraper et API
+    h_name = selected_match.get('home_team', 'Domicile')
+    a_name = selected_match.get('away_team', 'Extérieur')
+    # L'API RapidAPI peut renvoyer 'home_team_score', le scraper renvoie 'home_score'
+    h_score = selected_match.get('home_score', selected_match.get('home_team_score', 0))
+    a_score = selected_match.get('away_score', selected_match.get('away_team_score', 0))
+    
+    st.header(f"{h_name} {h_score} - {a_score} {a_name}")
     
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("🏠 Domicile")
         c_pre_h = st.number_input("Cote pré-match Dom.", 1.01, 50.0, 1.80)
-        h_shots = st.number_input("Tirs Dom.", 0, 50, selected_match.get('h_shots', 5))
-        h_target = st.number_input("Tirs Cadrés Dom.", 0, 50, selected_match.get('h_target', 2))
-        h_poss = st.slider("% Possession Dom.", 0, 100, selected_match.get('h_poss', 50))
+        h_shots = st.number_input("Tirs Dom.", 0, 50, int(selected_match.get('h_shots', 5)))
+        h_target = st.number_input("Tirs Cadrés Dom.", 0, 50, int(selected_match.get('h_target', 2)))
+        h_poss = st.slider("% Possession Dom.", 0, 100, int(selected_match.get('h_poss', 50)))
         h_red = st.number_input("Rouges Dom.", 0, 5, 0)
     with col2:
         st.subheader("🚀 Extérieur")
         c_pre_a = st.number_input("Cote pré-match Ext.", 1.01, 50.0, 3.50)
-        a_shots = st.number_input("Tirs Ext.", 0, 50, selected_match.get('a_shots', 3))
-        a_target = st.number_input("Tirs Cadrés Ext.", 0, 50, selected_match.get('a_target', 1))
+        a_shots = st.number_input("Tirs Ext.", 0, 50, int(selected_match.get('a_shots', 3)))
+        a_target = st.number_input("Tirs Cadrés Ext.", 0, 50, int(selected_match.get('a_target', 1)))
         st.info(f"Possession Ext. : {100-h_poss}%")
         a_red = st.number_input("Rouges Ext.", 0, 5, 0)
 
@@ -181,9 +178,9 @@ if selected_match:
     r1.metric("Lambda Actuel", f"{l_dyn:.2f}")
     r2.metric("Probabilité +0.5", f"{prob_05:.1%}", f"Fair: {fair_cote:.2f}")
     with r3:
-        bk_cote = st.number_input("Cote Bookmaker Actuelle", value=fair_cote + 0.1)
+        bk_cote = st.number_input("Cote Bookmaker Actuelle", value=round(fair_cote + 0.1, 2))
         edge = (prob_05 * bk_cote) - 1
         if edge > 0:
             st.success(f"VALUE DÉTECTÉE : +{edge:.1%}")
-            st.metric("MISE CONSEILLÉE (KELLY)", f"{(edge/(bk_cote-1))*kelly_f*bk:.2f} €")
+            st.metric("MISE CONSEILLÉE (KELLY)", f"{max(0, (edge/(bk_cote-1))*kelly_f*bk):.2f} €")
         else: st.error("PAS DE VALUE")
