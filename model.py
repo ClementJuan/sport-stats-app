@@ -79,36 +79,37 @@ def get_live_matches(key):
 
 # --- CALCULATEUR ---
 def calculate_advanced_lambda(base_l, stats):
-    # Sécurisation des accès aux dictionnaires avec .get() et valeurs par défaut
+    # Sécurisation des accès
     h_t = stats.get('h_target', 0)
     h_s = stats.get('h_shots', 0)
     a_t = stats.get('a_target', 0)
     a_s = stats.get('a_shots', 0)
     
-    danger_h = (h_t * 0.35) + ((h_s - h_t) * 0.12)
-    danger_a = (a_t * 0.35) + ((a_s - a_t) * 0.12)
+    # Correction des multiplicateurs de danger (plus conservateurs)
+    danger_h = (h_t * 0.15) + ((h_s - h_t) * 0.05)
+    danger_a = (a_t * 0.15) + ((a_s - a_t) * 0.05)
     
     c_h = stats.get('cote_pre_h', 1.8)
     c_a = stats.get('cote_pre_a', 3.5)
-    c_n = stats.get('cote_pre_n', 3.2) # Cote du nul
+    c_n = stats.get('cote_pre_n', 3.2)
     
-    talent_h = max(0.5, 2.0 / c_h) if c_h > 0 else 1.0
-    talent_a = max(0.5, 2.0 / c_a) if c_a > 0 else 1.0
+    talent_h = max(0.8, 2.0 / c_h) if c_h > 0 else 1.0
+    talent_a = max(0.8, 2.0 / c_a) if c_a > 0 else 1.0
     
     draw_factor = 1.0 + (c_n - 3.20) * 0.05
-    draw_factor = max(0.85, min(1.25, draw_factor)) 
+    draw_factor = max(0.90, min(1.15, draw_factor)) 
     
-    poss_bonus_h = 0.08 if stats.get('h_poss', 50) > 57 else 0
-    poss_bonus_a = 0.08 if (100 - stats.get('h_poss', 50)) > 57 else 0
+    mod_h = (danger_h * talent_h)
+    mod_a = (danger_a * talent_a)
     
-    mod_h = (danger_h * talent_h) + poss_bonus_h - (stats.get('h_red', 0) * 0.3)
-    mod_a = (danger_a * talent_a) + poss_bonus_a - (stats.get('a_red', 0) * 0.3)
+    # Malus carton rouge
+    red_penalty = (stats.get('h_red', 0) + stats.get('a_red', 0)) * 0.15
     
-    return base_l * (1.0 + mod_h + mod_a) * draw_factor
+    return base_l * (1.0 + mod_h + mod_a - red_penalty) * draw_factor
 
 # --- UI STREAMLIT ---
 st.title("⚽ Poisson Live Pro Scanner")
-st.caption("Analyse Multi-Objectifs avec intégration de la probabilité de Nul (Draw Bias)")
+st.caption("Correction mathématique : Distribution de Poisson Cumulative Inversée")
 
 if 'live_data' not in st.session_state:
     st.session_state.live_data = None
@@ -175,8 +176,9 @@ if selected_match:
     st.divider()
     c_left, c_right = st.columns([1, 2])
     with c_left:
-        min_actuelle = st.slider("Minute du match", 1, 95, 75)
-        l_base = st.number_input("Lambda (Espérance pré-match)", 0.1, 10.0, 2.6)
+        min_actuelle = st.slider("Minute du match", 1, 95, 45)
+        l_base = st.number_input("Lambda (Espérance pré-match)", 0.1, 10.0, 3.35)
+        st.caption("Note : Pour une cote pré-match de 1.50 sur le +2.5, utilisez 3.35")
     
     stats_map = {
         'h_shots': h_shots, 'h_target': h_target, 'h_poss': h_poss, 'h_red': h_red, 
@@ -185,7 +187,8 @@ if selected_match:
     }
     
     l_dyn = calculate_advanced_lambda(l_base, stats_map)
-    temps_restant_pct = max((90 - min_actuelle), 5) / 90
+    # Temps restant linéaire avec légère pondération fin de match
+    temps_restant_pct = max((90 - min_actuelle), 2) / 90
     l_live = l_dyn * temps_restant_pct
 
     with c_right:
@@ -193,16 +196,22 @@ if selected_match:
         paliers = [0.5, 1.5, 2.5, 3.5, 4.5]
         for p in paliers:
             if p > total_score_actuel:
-                buts_requis = p - total_score_actuel
-                n_requis = int(buts_requis + 0.5) 
+                # Nombre de buts supplémentaires pour ATTEINDRE strictement le seuil
+                # Exemple : Score 0-0, Over 2.5 -> On a besoin de 3 buts ou plus.
+                # Prob(X >= n) = 1 - Prob(X <= n-1)
+                n_requis = int(p - total_score_actuel + 0.5) 
+                
+                # Calcul Poisson : Probabilité d'avoir n_requis buts ou plus
                 prob_over = 1 - poisson.cdf(n_requis - 1, l_live)
-                fair_cote = 1/prob_over if prob_over > 0.001 else 999.0
-                with st.expander(f"Marché : Over {p} (Total Buts)", expanded=(p == total_score_actuel + 0.5)):
+                
+                fair_cote = 1/prob_over if prob_over > 0.0001 else 999.0
+                
+                with st.expander(f"Marché : Over {p} (Total Buts)", expanded=(p == 2.5)):
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Probabilité", f"{prob_over:.1%}")
                     m2.metric("Cote Fair", f"{fair_cote:.2f}")
                     with m3:
-                        bk_c = st.number_input(f"Cote Bookie Over {p}", value=round(fair_cote + 0.2, 2), key=f"bk_{p}")
+                        bk_c = st.number_input(f"Cote Bookie Over {p}", value=round(fair_cote, 2), key=f"bk_{p}", step=0.01)
                         edge = (prob_over * bk_c) - 1
                         if edge > 0:
                             st.success(f"VALUE : +{edge:.1%}")
@@ -212,4 +221,4 @@ if selected_match:
             else: st.write(f"✅ **Over {p}** est déjà validé")
 
     st.divider()
-    st.info(f"Lambda Actuel : {l_dyn:.2f} | Lambda Live : {l_live:.2f}")
+    st.info(f"Lambda Actuel : {l_dyn:.2f} | Lambda Live (pour les {90-min_actuelle} min restantes) : {l_live:.2f}")
