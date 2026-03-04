@@ -9,8 +9,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
+import os
 
 # --- CONFIGURATION ---
 try:
@@ -21,7 +20,7 @@ except KeyError:
 
 st.set_page_config(page_title="Poisson Live Scanner Pro+", layout="wide")
 
-# --- CONFIGURATION SELENIUM (V2 - COMPATIBILITÉ MAXIMUM) ---
+# --- CONFIGURATION SELENIUM (V3 - UTILISATION BINAIRE SYSTÈME) ---
 @st.cache_resource
 def get_driver():
     chrome_options = Options()
@@ -32,15 +31,29 @@ def get_driver():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
+    # Chemins standards sur Streamlit Cloud pour Chromium
+    # Note : Le binaire 'chromium' installé via apt installe aussi son driver
+    potential_driver_paths = [
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver"
+    ]
+    
+    driver_path = None
+    for path in potential_driver_paths:
+        if os.path.exists(path):
+            driver_path = path
+            break
+
     try:
-        # Utilisation de webdriver-manager pour installer le driver correspondant au Chromium installé
-        # On spécifie ChromeType.CHROMIUM car c'est ce que Streamlit installe via apt
-        driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
-        service = Service(driver_path)
-        return webdriver.Chrome(service=service, options=chrome_options)
+        if driver_path:
+            service = Service(driver_path)
+            return webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            # Fallback automatique (si les chemins fixes échouent)
+            return webdriver.Chrome(options=chrome_options)
     except Exception as e:
-        st.error(f"Erreur d'initialisation Selenium : {e}")
-        st.info("💡 Vérifiez que votre fichier 'packages.txt' contient 'chromium' (et non chromium-chromedriver).")
+        st.error(f"Erreur Selenium : {e}")
+        st.info("💡 Si l'erreur persiste après le Reboot, vérifiez que 'packages.txt' contient bien 'chromium'.")
         return None
 
 # --- FONCTION API POUR LA LISTE DES MATCHS ---
@@ -61,29 +74,28 @@ def scrape_sofascore_live(url):
     
     try:
         driver.get(url)
-        # Attente prolongée car le Cloud est parfois plus lent
         wait = WebDriverWait(driver, 20)
-        # On attend qu'un élément de statistiques soit présent
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='StatRow']"))) 
+        # Attente d'un élément générique de stats
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[class*='StatRow'], div[class*='Statistics']"))) 
 
-        # Extraction des noms
-        home_name = driver.find_element(By.CSS_SELECTOR, "h2[class*='TeamName']").text
-        away_name = driver.find_elements(By.CSS_SELECTOR, "h2[class*='TeamName']")[1].text
+        # Extraction des noms d'équipes
+        team_elements = driver.find_elements(By.CSS_SELECTOR, "h2[class*='TeamName']")
+        home_name = team_elements[0].text if len(team_elements) > 0 else "Domicile"
+        away_name = team_elements[1].text if len(team_elements) > 1 else "Extérieur"
 
         # Extraction du score
         score_elements = driver.find_elements(By.CSS_SELECTOR, "span[class*='ScoreValue']")
         h_score = int(score_elements[0].text) if score_elements else 0
         a_score = int(score_elements[1].text) if len(score_elements) > 1 else 0
 
-        # Récupération du HTML rendu pour BeautifulSoup
-        page_source = driver.page_source
-        soup = BeautifulSoup(page_source, 'html.parser')
+        # Parsing avec BeautifulSoup pour la rapidité sur les stats textuelles
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
         
         def find_stat(label):
-            row = soup.find(text=re.compile(label, re.I))
+            row = soup.find(string=re.compile(label, re.I))
             if row:
                 parent = row.find_parent().find_parent()
-                values = parent.find_all(text=re.compile(r'\d+'))
+                values = parent.find_all(string=re.compile(r'\d+'))
                 if len(values) >= 2:
                     v_h = int(re.search(r'\d+', values[0]).group())
                     v_a = int(re.search(r'\d+', values[-1]).group())
@@ -123,7 +135,7 @@ def calculate_advanced_lambda(base_l, stats):
 
 # --- UI STREAMLIT ---
 st.title("⚽ Poisson Live Pro Scanner")
-st.caption("Synchronisation intelligente via SofaScore")
+st.caption("Synchronisation intelligente via SofaScore & Selenium")
 
 with st.sidebar:
     st.header("💳 Bankroll")
@@ -137,7 +149,7 @@ selected_match = None
 if source_mode == "URL SofaScore":
     url = st.text_input("Lien SofaScore du match :")
     if url and st.button("🔥 Lancer le Scraping Selenium"):
-        with st.spinner("Analyse du match en cours..."):
+        with st.spinner("Analyse du match en cours (Chrome Headless)..."):
             data = scrape_sofascore_live(url)
             if data:
                 st.session_state.live_data = data
