@@ -9,7 +9,6 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURATION ---
 try:
@@ -20,7 +19,7 @@ except KeyError:
 
 st.set_page_config(page_title="Poisson Live Scanner Pro+", layout="wide")
 
-# --- CONFIGURATION SELENIUM (POUR LE CLOUD) ---
+# --- CONFIGURATION SELENIUM (OPTIMISÉE POUR STREAMLIT CLOUD) ---
 @st.cache_resource
 def get_driver():
     chrome_options = Options()
@@ -29,16 +28,23 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    # Simulation d'un vrai utilisateur
+    # Simulation d'un vrai utilisateur pour éviter les blocages
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
+    # Chemins par défaut pour Chromium sur Streamlit Cloud (Linux)
+    chrome_options.binary_location = "/usr/bin/chromium"
+    
     try:
-        # Installation automatique du driver compatible
-        service = Service(ChromeDriverManager().install())
+        # On utilise le binaire installé par packages.txt plutôt que webdriver-manager
+        service = Service("/usr/bin/chromedriver")
         return webdriver.Chrome(service=service, options=chrome_options)
     except Exception as e:
-        st.error(f"Erreur d'initialisation du driver : {e}")
-        return None
+        # Fallback pour le développement local (si le chemin Linux échoue)
+        try:
+            return webdriver.Chrome(options=chrome_options)
+        except Exception as e2:
+            st.error(f"Erreur d'initialisation Selenium : {e2}")
+            return None
 
 # --- FONCTION API POUR LA LISTE DES MATCHS ---
 def get_live_matches(key):
@@ -53,7 +59,9 @@ def get_live_matches(key):
 # --- SCRAPING AVANCÉ AVEC SELENIUM ---
 def scrape_sofascore_live(url):
     driver = get_driver()
-    if not driver: return None
+    if not driver: 
+        st.error("Le navigateur n'a pas pu démarrer. Vérifiez 'packages.txt'.")
+        return None
     
     try:
         driver.get(url)
