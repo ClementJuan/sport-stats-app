@@ -84,9 +84,16 @@ def calculate_advanced_lambda(base_l, stats):
     
     c_h = stats.get('cote_pre_h', 1.8)
     c_a = stats.get('cote_pre_a', 3.5)
+    c_n = stats.get('cote_pre_n', 3.2) # Cote du nul
     
     talent_h = max(0.5, 2.0 / c_h) if c_h > 0 else 1.0
     talent_a = max(0.5, 2.0 / c_a) if c_a > 0 else 1.0
+    
+    # Impact de la cote du nul sur l'espérance de but
+    # Un nul faible (ex 2.8) réduit l'espérance, un nul élevé (ex 4.5) l'augmente.
+    # La valeur pivot est fixée à 3.20.
+    draw_factor = 1.0 + (c_n - 3.20) * 0.05
+    draw_factor = max(0.85, min(1.25, draw_factor)) # Limiter l'impact entre -15% et +25%
     
     poss_bonus_h = 0.08 if stats.get('h_poss', 50) > 57 else 0
     poss_bonus_a = 0.08 if (100 - stats.get('h_poss', 50)) > 57 else 0
@@ -94,11 +101,12 @@ def calculate_advanced_lambda(base_l, stats):
     mod_h = (danger_h * talent_h) + poss_bonus_h - (stats.get('h_red', 0) * 0.3)
     mod_a = (danger_a * talent_a) + poss_bonus_a - (stats.get('a_red', 0) * 0.3)
     
-    return base_l * (1.0 + mod_h + mod_a)
+    # On applique le multiplicateur du nul au résultat final
+    return base_l * (1.0 + mod_h + mod_a) * draw_factor
 
 # --- UI STREAMLIT ---
 st.title("⚽ Poisson Live Pro Scanner")
-st.caption("Analyse Multi-Objectifs (Over 0.5, 1.5, 2.5, 3.5) basée sur le score live")
+st.caption("Analyse Multi-Objectifs avec intégration de la probabilité de Nul (Draw Bias)")
 
 if 'live_data' not in st.session_state:
     st.session_state.live_data = None
@@ -142,6 +150,11 @@ if selected_match:
     
     st.header(f"{h_name} {h_score} - {a_score} {a_name}")
     
+    # Ajout de la cote du nul au centre
+    col_n1, col_n2, col_n3 = st.columns(3)
+    with col_n2:
+        c_pre_n = st.number_input("Cote pré-match du NUL", 1.01, 20.0, 3.20, help="Plus cette cote est basse, plus le match est attendu comme fermé.")
+
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("🏠 Domicile")
@@ -165,11 +178,11 @@ if selected_match:
         l_base = st.number_input("Lambda (Espérance pré-match)", 0.1, 10.0, 2.6)
     
     stats_map = {
-        'h_shots': h_shots, 'h_target': h_target, 'h_poss': h_poss, 'h_red': h_red, 'cote_pre_h': c_pre_h,
-        'a_shots': a_shots, 'a_target': a_target, 'a_red': a_red, 'cote_pre_a': c_pre_a
+        'h_shots': h_shots, 'h_target': h_target, 'h_poss': h_poss, 'h_red': h_red, 
+        'cote_pre_h': c_pre_h, 'cote_pre_a': c_pre_a, 'cote_pre_n': c_pre_n
     }
     
-    # Calcul du Lambda ajusté au temps restant
+    # Calcul du Lambda ajusté au temps restant et au biais du nul
     l_dyn = calculate_advanced_lambda(l_base, stats_map)
     temps_restant_pct = max((90 - min_actuelle), 5) / 90
     l_live = l_dyn * temps_restant_pct
@@ -177,16 +190,11 @@ if selected_match:
     with c_right:
         st.subheader("📊 Analyse Multi-Marchés")
         
-        # On définit les paliers d'Over à analyser
         paliers = [0.5, 1.5, 2.5, 3.5, 4.5]
         
         for p in paliers:
             if p > total_score_actuel:
-                # Nombre de buts supplémentaires nécessaires
                 buts_requis = p - total_score_actuel
-                # Probabilité de marquer MOINS que les buts requis (CDF)
-                # La probabilité d'Over est 1 - P(X < buts_requis)
-                # Pour Poisson, P(X >= n) = 1 - P(X <= n-1)
                 n_requis = int(buts_requis + 0.5) 
                 prob_over = 1 - poisson.cdf(n_requis - 1, l_live)
                 fair_cote = 1/prob_over if prob_over > 0.001 else 999.0
@@ -209,4 +217,4 @@ if selected_match:
                 st.write(f"✅ **Over {p}** est déjà validé (Score: {total_score_actuel})")
 
     st.divider()
-    st.info(f"Lambda Actuel (Pression + Talent) : {l_dyn:.2f} | Lambda Live (Temps restant) : {l_live:.2f}")
+    st.info(f"Lambda Actuel (Pression + Draw Bias) : {l_dyn:.2f} | Lambda Live : {l_live:.2f}")
