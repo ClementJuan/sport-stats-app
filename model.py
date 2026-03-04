@@ -82,7 +82,6 @@ def calculate_advanced_lambda(base_l, stats):
     danger_h = (stats['h_target'] * 0.35) + ((stats['h_shots'] - stats['h_target']) * 0.12)
     danger_a = (stats['a_target'] * 0.35) + ((stats['a_shots'] - stats['a_target']) * 0.12)
     
-    # Sécurité division par zéro sur les cotes
     c_h = stats.get('cote_pre_h', 1.8)
     c_a = stats.get('cote_pre_a', 3.5)
     
@@ -99,7 +98,7 @@ def calculate_advanced_lambda(base_l, stats):
 
 # --- UI STREAMLIT ---
 st.title("⚽ Poisson Live Pro Scanner")
-st.caption("Mode Ultra-Léger - Performance et Stabilité garanties")
+st.caption("Analyse Multi-Objectifs (Over 0.5, 1.5, 2.5, 3.5) basée sur le score live")
 
 if 'live_data' not in st.session_state:
     st.session_state.live_data = None
@@ -135,12 +134,11 @@ else:
             st.warning("Aucun match trouvé via l'API. Essayez le mode URL.")
 
 if selected_match:
-    # Correction KeyError : Utilisation de .get() pour supporter les différents noms de clés entre Scraper et API
     h_name = selected_match.get('home_team', 'Domicile')
     a_name = selected_match.get('away_team', 'Extérieur')
-    # L'API RapidAPI peut renvoyer 'home_team_score', le scraper renvoie 'home_score'
     h_score = selected_match.get('home_score', selected_match.get('home_team_score', 0))
     a_score = selected_match.get('away_score', selected_match.get('away_team_score', 0))
+    total_score_actuel = h_score + a_score
     
     st.header(f"{h_name} {h_score} - {a_score} {a_name}")
     
@@ -161,26 +159,54 @@ if selected_match:
         a_red = st.number_input("Rouges Ext.", 0, 5, 0)
 
     st.divider()
-    min_actuelle = st.slider("Minute du match", 1, 95, 75)
-    l_base = st.number_input("Lambda (Espérance de buts totale)", 0.1, 10.0, 2.6)
-
+    c_left, c_right = st.columns([1, 2])
+    with c_left:
+        min_actuelle = st.slider("Minute du match", 1, 95, 75)
+        l_base = st.number_input("Lambda (Espérance pré-match)", 0.1, 10.0, 2.6)
+    
     stats_map = {
         'h_shots': h_shots, 'h_target': h_target, 'h_poss': h_poss, 'h_red': h_red, 'cote_pre_h': c_pre_h,
         'a_shots': a_shots, 'a_target': a_target, 'a_red': a_red, 'cote_pre_a': c_pre_a
     }
     
+    # Calcul du Lambda ajusté au temps restant
     l_dyn = calculate_advanced_lambda(l_base, stats_map)
-    l_live = l_dyn * (max((90 - min_actuelle), 5) / 90)
-    prob_05 = 1 - poisson.pmf(0, l_live)
-    fair_cote = 1/prob_05 if prob_05 > 0.01 else 100.0
-    
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Lambda Actuel", f"{l_dyn:.2f}")
-    r2.metric("Probabilité +0.5", f"{prob_05:.1%}", f"Fair: {fair_cote:.2f}")
-    with r3:
-        bk_cote = st.number_input("Cote Bookmaker Actuelle", value=round(fair_cote + 0.1, 2))
-        edge = (prob_05 * bk_cote) - 1
-        if edge > 0:
-            st.success(f"VALUE DÉTECTÉE : +{edge:.1%}")
-            st.metric("MISE CONSEILLÉE (KELLY)", f"{max(0, (edge/(bk_cote-1))*kelly_f*bk):.2f} €")
-        else: st.error("PAS DE VALUE")
+    temps_restant_pct = max((90 - min_actuelle), 5) / 90
+    l_live = l_dyn * temps_restant_pct
+
+    with c_right:
+        st.subheader("📊 Analyse Multi-Marchés")
+        
+        # On définit les paliers d'Over à analyser
+        paliers = [0.5, 1.5, 2.5, 3.5, 4.5]
+        
+        for p in paliers:
+            if p > total_score_actuel:
+                # Nombre de buts supplémentaires nécessaires
+                buts_requis = p - total_score_actuel
+                # Probabilité de marquer MOINS que les buts requis (CDF)
+                # La probabilité d'Over est 1 - P(X < buts_requis)
+                # Pour Poisson, P(X >= n) = 1 - P(X <= n-1)
+                n_requis = int(buts_requis + 0.5) 
+                prob_over = 1 - poisson.cdf(n_requis - 1, l_live)
+                fair_cote = 1/prob_over if prob_over > 0.001 else 999.0
+                
+                with st.expander(f"Marché : Over {p} (Total Buts)", expanded=(p == total_score_actuel + 0.5)):
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Probabilité", f"{prob_over:.1%}")
+                    m2.metric("Cote Fair", f"{fair_cote:.2f}")
+                    
+                    with m3:
+                        bk_c = st.number_input(f"Cote Bookie Over {p}", value=round(fair_cote + 0.2, 2), key=f"bk_{p}")
+                        edge = (prob_over * bk_c) - 1
+                        if edge > 0:
+                            st.success(f"VALUE : +{edge:.1%}")
+                            mise = max(0, (edge/(bk_c-1))*kelly_f*bk)
+                            st.write(f"**Mise : {mise:.2f} €**")
+                        else:
+                            st.write("Pas de value")
+            else:
+                st.write(f"✅ **Over {p}** est déjà validé (Score: {total_score_actuel})")
+
+    st.divider()
+    st.info(f"Lambda Actuel (Pression + Talent) : {l_dyn:.2f} | Lambda Live (Temps restant) : {l_live:.2f}")
