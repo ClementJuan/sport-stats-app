@@ -52,12 +52,11 @@ def scrape_detailed_stats(url):
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[class*="Box"]')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         driver.quit()
+        # Simulation d'extraction pour l'exemple
         return {
             "tirs_cadres": 8, 
             "corners": 6, 
-            "possession": 55,
-            "red_cards_home": 0,
-            "red_cards_away": 0
+            "possession": 55
         }
     except:
         if driver: driver.quit()
@@ -67,85 +66,106 @@ def scrape_detailed_stats(url):
 def calculate_live_value(base_l, stats, red_home=0, red_away=0):
     modifier = 1.0
     min_ = max(stats.get('minute', 45), 1)
+    # Seuil de pression (tirs cadrés / minute)
     if stats.get('tirs_cadres', 0) > (min_ / 10): modifier += 0.15
+    # Seuil corners
     if stats.get('corners', 0) > (min_ / 8): modifier += 0.10
+    # Impact Cartons Rouges
     if red_home > 0: modifier += (0.25 * red_home)
     if red_away > 0: modifier += (0.25 * red_away)
     return base_l * modifier
 
 # --- INTERFACE PRINCIPALE ---
 st.title("⚽ Scanner de Value Live Pro")
-st.caption("Filtrage par pays et compétition | Gestion des Rouges | Analyse Poisson")
+st.caption("Filtrage hiérarchique | Mode Manuel de Secours | Analyse Poisson Dynamique")
 
-# Sidebar : Gestion de Bankroll
+# Sidebar : Gestion de Bankroll et Mode
 with st.sidebar:
     st.header("💳 Bankroll")
     bk = st.number_input("Capital (€)", value=1000.0)
     kelly_f = st.slider("Fraction Kelly", 0.1, 1.0, 0.2)
     
     st.divider()
-    if st.button("🔄 Actualiser les matchs"):
-        with st.spinner("Récupération des lives..."):
-            st.session_state.all_matches = get_live_matches(API_KEY)
-        st.toast("Liste synchronisée !")
+    st.header("🛠️ Options")
+    mode_manuel = st.checkbox("Saisie Manuelle (si match absent)")
+    
+    if not mode_manuel:
+        if st.button("🔄 Actualiser les matchs API"):
+            with st.spinner("Récupération des lives..."):
+                st.session_state.all_matches = get_live_matches(API_KEY)
+            st.toast("Liste synchronisée !")
 
-# --- LOGIQUE DE FILTRAGE HIÉRARCHIQUE ---
-if 'all_matches' in st.session_state and st.session_state.all_matches:
-    matches = st.session_state.all_matches
-    
-    # 1. Grouper les matchs par Pays et Compétition
-    # Structure : { "France": { "Ligue 1": [match1, match2], "Coupe de France": [...] } }
-    hierarchy = {}
-    for m in matches:
-        country = m.get('competition_cluster', 'International')
-        league = m.get('competition_name', 'Autre Compétition')
-        
-        if country not in hierarchy:
-            hierarchy[country] = {}
-        if league not in hierarchy[country]:
-            hierarchy[country][league] = []
-        
-        hierarchy[country][league].append(m)
+# --- LOGIQUE DE SÉLECTION DU MATCH ---
+selected_match_data = None
 
-    st.subheader("📡 Sélection du Match")
+if mode_manuel:
+    st.subheader("📝 Saisie Manuelle du Match")
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        h_team = st.text_input("Équipe Domicile", "Team A")
+        h_score = st.number_input("Score Domicile", 0, 20, 0)
+    with col_m2:
+        a_team = st.text_input("Équipe Extérieur", "Team B")
+        a_score = st.number_input("Score Extérieur", 0, 20, 0)
     
-    # Sélecteurs en cascade
-    col_filter1, col_filter2 = st.columns(2)
-    
-    with col_filter1:
-        countries = sorted(list(hierarchy.keys()))
-        selected_country = st.selectbox("🌍 Sélectionner un pays / catégorie :", countries)
+    selected_match_data = {
+        "home_team": h_team,
+        "away_team": a_team,
+        "home_score": h_score,
+        "away_score": a_score
+    }
+else:
+    if 'all_matches' in st.session_state and st.session_state.all_matches:
+        matches = st.session_state.all_matches
+        hierarchy = {}
+        for m in matches:
+            country = m.get('competition_cluster', 'International')
+            league = m.get('competition_name', 'Autre Compétition')
+            if country not in hierarchy: hierarchy[country] = {}
+            if league not in hierarchy[country]: hierarchy[country][league] = []
+            hierarchy[country][league].append(m)
 
-    with col_filter2:
-        leagues = sorted(list(hierarchy[selected_country].keys()))
-        selected_league = st.selectbox("🏆 Compétition :", leagues)
+        st.subheader("📡 Sélection via API")
+        col_filter1, col_filter2 = st.columns(2)
+        with col_filter1:
+            countries = sorted(list(hierarchy.keys()))
+            selected_country = st.selectbox("🌍 Pays / Catégorie :", countries)
+        with col_filter2:
+            leagues = sorted(list(hierarchy[selected_country].keys()))
+            selected_league = st.selectbox("🏆 Compétition :", leagues)
 
-    # Liste des matchs pour la ligue sélectionnée
-    current_league_matches = hierarchy[selected_country][selected_league]
-    match_options = [f"{m['home_team']} {m.get('home_score', 0)}-{m.get('away_score', 0)} {m['away_team']}" for m in current_league_matches]
-    
-    choice = st.selectbox("🎯 Choisir le match en direct :", match_options)
-    selected_match = current_league_matches[match_options.index(choice)]
-    
-    # --- ANALYSE DU MATCH SÉLECTIONNÉ ---
+        current_league_matches = hierarchy[selected_country][selected_league]
+        match_options = [f"{m['home_team']} {m.get('home_score', 0)}-{m.get('away_score', 0)} {m['away_team']}" for m in current_league_matches]
+        choice = st.selectbox("🎯 Match en direct :", match_options)
+        selected_match_data = current_league_matches[match_options.index(choice)]
+    else:
+        st.info("Aucun match chargé. Cliquez sur 'Actualiser' ou passez en 'Mode Manuel' dans la barre latérale.")
+
+# --- ANALYSE DU MATCH ---
+if selected_match_data:
     st.divider()
     c1, c2, c3 = st.columns([1, 1, 2])
     
     with c1:
         st.write("🔴 **Cartons Rouges**")
-        red_h = st.number_input(f"Rouge {selected_match['home_team']}", 0, 5, 0)
-        red_a = st.number_input(f"Rouge {selected_match['away_team']}", 0, 5, 0)
+        red_h = st.number_input(f"Rouge {selected_match_data['home_team']}", 0, 5, 0)
+        red_a = st.number_input(f"Rouge {selected_match_data['away_team']}", 0, 5, 0)
 
     with c2:
         st.write("⏱️ **Temps & Score**")
         minute = st.slider("Minute du match", 1, 95, 70)
-        score_live = st.text_input("Score actuel", value=f"{selected_match.get('home_score', 0)}-{selected_match.get('away_score', 0)}")
+        score_display = f"{selected_match_data.get('home_score', 0)}-{selected_match_data.get('away_score', 0)}"
+        st.write(f"Score actuel : **{score_display}**")
 
     with c3:
-        st.write("📊 **Statistiques de Pression**")
-        if st.button("🛰️ Scraper les stats live (SofaScore)"):
-            st.session_state.detailed = scrape_detailed_stats("https://www.sofascore.com/...")
-            st.success("Stats récupérées !")
+        st.write("📊 **Stats Pression**")
+        url_sofa = st.text_input("URL SofaScore (optionnel pour scraping)", "")
+        if st.button("🛰️ Lancer Scraping Live") and url_sofa:
+            with st.spinner("Scraping en cours..."):
+                scraped = scrape_detailed_stats(url_sofa)
+                if scraped:
+                    st.session_state.detailed = scraped
+                    st.success("Stats mises à jour !")
         
         if 'detailed' not in st.session_state:
             st.session_state.detailed = {"tirs_cadres": 5, "corners": 4, "possession": 50}
@@ -157,7 +177,7 @@ if 'all_matches' in st.session_state and st.session_state.all_matches:
     st.divider()
     st.subheader("🧠 Résultat de l'Analyse")
     
-    l_base = 2.8 
+    l_base = st.number_input("Lambda pré-match estimé", value=2.8, step=0.1)
     stats_for_calc = {"minute": minute, "tirs_cadres": tirs, "corners": corners}
     l_dyn = calculate_live_value(l_base, stats_for_calc, red_h, red_a)
     
@@ -185,6 +205,3 @@ if 'all_matches' in st.session_state and st.session_state.all_matches:
         else:
             st.error(f"❌ PAS DE VALUE")
             st.info(f"Attendre une cote de **{fair_cote:.2f}**")
-
-else:
-    st.info("Utilisez le bouton 'Actualiser' pour charger les matchs.")
