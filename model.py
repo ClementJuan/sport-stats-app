@@ -1,42 +1,60 @@
 import streamlit as st
 from scipy.stats import poisson
+import time
 
-# Configuration de la page
-st.set_page_config(page_title="Poisson Live Predictor", layout="centered")
+st.set_page_config(page_title="Poisson Live Dashboard", layout="wide")
 
-st.title("⚽ Poisson Live Predictor")
-st.write("Ajustez les curseurs pour voir la probabilité d'un but en direct.")
+st.title("⚽ Poisson Live Predictor - Mode Simulation")
 
-# --- BARRE LATÉRALE (INPUTS) ---
-st.sidebar.header("Paramètres du match")
-lambda_initial = st.sidebar.slider("Espérance de buts pré-match", 0.5, 5.0, 2.8)
-minute = st.sidebar.slider("Minute actuelle", 1, 90, 75)
-tirs_actuels = st.sidebar.number_input("Tirs cadrés cumulés (Live)", value=6)
-tirs_attendus = st.sidebar.number_input("Tirs cadrés attendus à cette minute", value=5)
+# --- PARAMÈTRES DE BASE ---
+col_cfg1, col_cfg2 = st.columns(2)
+with col_cfg1:
+    lambda_init = st.number_input("Espérance de buts initiale (Match entier)", value=2.5)
+with col_cfg2:
+    vitesse = st.select_slider("Vitesse de simulation", options=[1, 2, 5, 10], value=1)
 
-# --- LOGIQUE MATHÉMATIQUE ---
-# Calcul de la pression
-pression = tirs_actuels / tirs_attendus if tirs_attendus > 0 else 1
+# --- INITIALISATION DE LA SIMULATION ---
+if 'minute_sim' not in st.session_state:
+    st.session_state.minute_sim = 1
+if 'tirs_sim' not in st.session_state:
+    st.session_state.tirs_sim = 0
 
-# Ajustement Lambda
-temps_restant_pct = (90 - minute) / 90
-lambda_ajuste = (lambda_initial * temps_restant_pct) * pression
+btn_play = st.button("▶️ Lancer / Reprendre le match")
 
-# Calcul Poisson
-prob_zero_but = poisson.pmf(0, lambda_ajuste)
-prob_au_moins_un = 1 - prob_zero_but
-cote_juste = 1 / prob_au_moins_un if prob_au_moins_un > 0 else 100
+# --- BOUCLE DE SIMULATION ---
+if btn_play:
+    # On crée un espace vide pour mettre à jour les données sans recharger toute la page
+    placeholder = st.empty()
+    
+    for m in range(st.session_state.minute_sim, 91):
+        st.session_state.minute_sim = m
+        # On simule un tir cadré de temps en temps (aléatoire pour le test)
+        if m % 12 == 0: 
+            st.session_state.tirs_sim += 1
+            
+        # --- CALCULS MATHÉMATIQUES ---
+        tirs_attendus = (m / 90) * 8 # On estime qu'on attend 8 tirs par match
+        pression = st.session_state.tirs_sim / tirs_attendus if tirs_attendus > 0 else 1
+        
+        temps_restant_pct = (90 - m) / 90
+        lambda_ajuste = (lambda_init * temps_restant_pct) * pression
+        
+        prob_but = 1 - poisson.pmf(0, lambda_ajuste)
+        cote_juste = 1 / prob_but if prob_but > 0.01 else 100
 
-# --- AFFICHAGE DES RÉSULTATS ---
-st.divider()
-col1, col2 = st.columns(2)
-
-with col1:
-    st.metric("Probabilité d'un but", f"{prob_au_moins_un:.2%}")
-
-with col2:
-    st.metric("Cote minimale (Value)", f"{cote_juste:.2f}")
-
-st.info(f"Indice de pression actuel : {pression:.2f}")
-if pression > 1.2:
-    st.success("🔥 Forte pression détectée !")
+        # --- AFFICHAGE DYNAMIQUE ---
+        with placeholder.container():
+            st.subheader(f"⏱️ Chronomètre : {m}'")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Tirs Cadrés", st.session_state.tirs_sim)
+            c2.metric("Probabilité prochain but", f"{prob_but:.1%}")
+            c3.metric("Cote Value", f"{cote_juste:.2f}")
+            
+            # Barre de progression du match
+            st.progress(m / 90)
+            
+            if pression > 1.3:
+                st.warning(f"⚠️ Alerte Pression : {pression:.2f} (Le match s'emballe !)")
+        
+        time.sleep(1 / vitesse) # On attend avant la minute suivante
