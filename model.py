@@ -1,60 +1,81 @@
 import streamlit as st
+import requests
 from scipy.stats import poisson
-import time
 
-st.set_page_config(page_title="Poisson Live Dashboard", layout="wide")
+# --- CONFIGURATION ---
+API_KEY = st.secrets["api_key"]
+HOST = "football-prediction-api.p.rapidapi.com"
+URL = f"https://{HOST}/api/v2/predictions"
 
-st.title("⚽ Poisson Live Predictor - Mode Simulation")
+st.set_page_config(page_title="Poisson Live Predictor", layout="wide")
 
-# --- PARAMÈTRES DE BASE ---
-col_cfg1, col_cfg2 = st.columns(2)
-with col_cfg1:
-    lambda_init = st.number_input("Espérance de buts initiale (Match entier)", value=2.5)
-with col_cfg2:
-    vitesse = st.select_slider("Vitesse de simulation", options=[1, 2, 5, 10], value=1)
+def get_data():
+    headers = {
+        "X-RapidAPI-Key": API_KEY,
+        "X-RapidAPI-Host": HOST
+    }
+    params = {"federation": "UEFA"}
+    try:
+        response = requests.get(URL, headers=headers, params=params)
+        if response.status_code == 200:
+            return response.json().get('data', [])
+        return []
+    except:
+        return []
 
-# --- INITIALISATION DE LA SIMULATION ---
-if 'minute_sim' not in st.session_state:
-    st.session_state.minute_sim = 1
-if 'tirs_sim' not in st.session_state:
-    st.session_state.tirs_sim = 0
+# --- INTERFACE ---
+st.title("⚽ Poisson Live Predictor")
 
-btn_play = st.button("▶️ Lancer / Reprendre le match")
+if 'matchs' not in st.session_state:
+    st.session_state.matchs = []
 
-# --- BOUCLE DE SIMULATION ---
-if btn_play:
-    # On crée un espace vide pour mettre à jour les données sans recharger toute la page
-    placeholder = st.empty()
+if st.button("🔄 Charger les matchs UEFA"):
+    st.session_state.matchs = get_data()
+
+if st.session_state.matchs:
+    # Création de la liste de sélection
+    options = [f"{m['home_team']} vs {m['away_team']} ({m['competition_name']})" for m in st.session_state.matchs]
+    selection = st.selectbox("Sélectionnez votre match :", options)
     
-    for m in range(st.session_state.minute_sim, 91):
-        st.session_state.minute_sim = m
-        # On simule un tir cadré de temps en temps (aléatoire pour le test)
-        if m % 12 == 0: 
-            st.session_state.tirs_sim += 1
-            
-        # --- CALCULS MATHÉMATIQUES ---
-        tirs_attendus = (m / 90) * 8 # On estime qu'on attend 8 tirs par match
-        pression = st.session_state.tirs_sim / tirs_attendus if tirs_attendus > 0 else 1
-        
-        temps_restant_pct = (90 - m) / 90
-        lambda_ajuste = (lambda_init * temps_restant_pct) * pression
-        
-        prob_but = 1 - poisson.pmf(0, lambda_ajuste)
-        cote_juste = 1 / prob_but if prob_but > 0.01 else 100
+    idx = options.index(selection)
+    match = st.session_state.matchs[idx]
+    
+    # Extraction des cotes pour affichage
+    cotes = match.get('odds', {})
+    
+    st.subheader(f"📊 Analyse de départ : {selection}")
+    col_c1, col_c2, col_c3 = st.columns(3)
+    col_c1.metric("Cote Dom (1)", cotes.get('1', 'N/A'))
+    col_c2.metric("Cote Nul (X)", cotes.get('X', 'N/A'))
+    col_c3.metric("Cote Ext (2)", cotes.get('2', 'N/A'))
 
-        # --- AFFICHAGE DYNAMIQUE ---
-        with placeholder.container():
-            st.subheader(f"⏱️ Chronomètre : {m}'")
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Tirs Cadrés", st.session_state.tirs_sim)
-            c2.metric("Probabilité prochain but", f"{prob_but:.1%}")
-            c3.metric("Cote Value", f"{cote_juste:.2f}")
-            
-            # Barre de progression du match
-            st.progress(m / 90)
-            
-            if pression > 1.3:
-                st.warning(f"⚠️ Alerte Pression : {pression:.2f} (Le match s'emballe !)")
+    st.divider()
+
+    # --- CALCULATEUR ---
+    col_in, col_out = st.columns(2)
+    
+    with col_in:
+        st.write("🔧 **Ajustement du modèle**")
+        # On estime un lambda de base selon la cote du nul
+        # Si cote X = 3.0 -> Lambda ~ 2.2 | Si cote X = 4.0 -> Lambda ~ 3.0
+        val_x = float(cotes.get('X', 3.3))
+        lambda_auto = round((val_x * 0.5) + 0.5, 1) 
         
-        time.sleep(1 / vitesse) # On attend avant la minute suivante
+        l_base = st.number_input("Espérance de buts initiale", value=lambda_auto, step=0.1)
+        minute = st.slider("Minute actuelle", 1, 90, 75)
+        pression = st.slider("Coefficient de Pression (Live)", 0.5, 2.5, 1.0)
+        
+    with col_out:
+        st.write("🎯 **Résultat Poisson**")
+        temps_restant = (90 - minute) / 90
+        l_live = (l_base * temps_restant) * pression
+        
+        prob_but = 1 - poisson.pmf(0, l_live)
+        cote_value = 1 / prob_but if prob_but > 0.01 else 100
+        
+        st.metric("Probabilité d'un but", f"{prob_but:.1%}")
+        st.success(f"Cote 'Value' conseillée : {cote_value:.2f}")
+        
+        st.write(f"Estimation du Lambda live : **{l_live:.2f}**")
+else:
+    st.info("Utilisez le bouton charger pour voir les matchs.")
